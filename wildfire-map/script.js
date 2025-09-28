@@ -9,12 +9,7 @@ L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
 // --- 1. Add some dummy fire locations ---
 var fireData = [
   { lat: 38.5, lon: -121.5 }, // Sacramento area
-  { lat: 34.2, lon: -118.4 }, // Los Angeles area
-  { lat: 36.7, lon: -119.8 },  // Fresno area
-    { lat: 39.0, lon: -120.5 } , // Chico area
-    { lat: 34.5, lon: -117.3 },  // San Bernardino area
-    { lat: 32.7, lon: -117.1 } , // San Diego area
-    { lat: 38.0, lon: -122.3 }  // Napa area
+  { lat: 34.2, lon: -118.4 } // Los Angeles area
 ];
 
 fireData.forEach(fire => {
