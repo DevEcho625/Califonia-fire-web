@@ -14,7 +14,7 @@ var fireData = [
     { lat: 39.0, lon: -120.5 } , // Chico area
     { lat: 34.5, lon: -117.3 },  // San Bernardino area
     { lat: 32.7, lon: -117.1 } , // San Diego area
-    { lat: 38.0, lon: -122.3 },  // Napa area
+    { lat: 38.0, lon: -122.3 }  // Napa area
 ];
 
 fireData.forEach(fire => {
