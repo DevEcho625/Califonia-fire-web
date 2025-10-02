@@ -9,7 +9,13 @@ Usage:
     python ca_wildfire_risk.py          # full state scan
     python ca_wildfire_risk.py --help   # see options
 """
-import os, json, argparse, tempfile, tarfile, requests
+import os 
+import json
+
+import argparse 
+import tempfile
+import tarfile 
+import requests
 import numpy as np
 import pandas as pd
 import xarray as xr
@@ -23,10 +29,12 @@ from sklearn.metrics import (roc_auc_score, precision_recall_fscore_support,
 import rasterio, rasterio.features
 from rasterio.transform import from_bounds
 from tqdm import tqdm
-import joblib, matplotlib
+import joblib
+import matplotlib
 matplotlib.use('Agg')  # headless
 import matplotlib.pyplot as plt
-import scikitplot as skplt
+from sklearn.metrics import roc_auc_score, precision_recall_fscore_support, brier_score_loss, roc_curve
+from sklearn.calibration import calibration_curve
 
 # ----------- CONFIG ---------- #
 CELL         = 1_000     # 1 km
@@ -38,13 +46,33 @@ CA_W, CA_S, CA_E, CA_N = -124.5, 32.25, -114.0, 42.0  # state bbox
 # ----------------------------- #
 
 def get_noaa_grid(lat, lon):
-    """7-day weather aggregates for a point; returns xarray.Dataset."""
+    """Fetch 7-day weather aggregates (JSON API) and return xarray.Dataset-like object."""
     meta = requests.get(f"https://api.weather.gov/points/{lat},{lon}", timeout=30).json()
     wx_url = meta['properties']['forecastGridData']
-    ds = xr.open_dataset(wx_url.replace('https','http')+'.nc', engine='netcdf4')
-    cut = ds.sel(time=slice(str(np.datetime64('today','D') - np.timedelta64(7,'D')),
-                            str(np.datetime64('today','D'))))
-    return cut[['temperature','maxWindSpeed','relativeHumidity']]
+    print("Fetching NOAA weather data …")
+
+    resp = requests.get(wx_url, headers={"User-Agent": "wildfire-risk-app"}, timeout=30)
+    resp.raise_for_status()
+    grid = resp.json()
+
+    # Extract time-series (simplified: temperature, wind, humidity)
+    temp_vals = [v["value"] for v in grid["properties"]["temperature"]["values"] if v["value"] is not None]
+    wind_vals = [v["value"] for v in grid["properties"]["windSpeed"]["values"] if v["value"] is not None]
+    rh_vals   = [v["value"] for v in grid["properties"]["relativeHumidity"]["values"] if v["value"] is not None]
+
+    times = [v["validTime"].split("/")[0] for v in grid["properties"]["temperature"]["values"][:len(temp_vals)]]
+
+    # Construct xarray.Dataset manually
+    ds = xr.Dataset(
+        {
+            "temperature": ("time", temp_vals),
+            "maxWindSpeed": ("time", wind_vals),
+            "relativeHumidity": ("time", rh_vals),
+        },
+        coords={"time": np.array(times, dtype="datetime64")}
+    )
+    return ds
+
 
 def terrain_fuel_tile(left, bottom, right, top, width_px, height_px):
     """Download 1-km CA DEM + fuel raster tile; returns elev, fuel, transform, crs."""
@@ -115,28 +143,64 @@ def train_model(lat, lon):
         la = rng.uniform(32.5, 42.0); lo = rng.uniform(-124.0, -114.0)
         X, y = build_training_scene(la, lo)
         X_list.append(X); y_list.append(y)
+
     X = np.vstack(X_list); y = np.hstack(y_list)
     X_train, X_val, y_train, y_val = train_test_split(
         X, y, test_size=0.2, random_state=MODEL_SEED, stratify=y)
+
     scaler = StandardScaler()
     X_train_s = scaler.fit_transform(X_train)
     X_val_s   = scaler.transform(X_val)
-    clf = GradientBoostingClassifier(n_estimators=N_EST, max_depth=MAX_DEPTH,
-                                     learning_rate=0.05, random_state=MODEL_SEED)
-    clf.fit(X_train_s, y_train)
-    preds = clf.predict_proba(X_val_s)[:,1]
-    auc   = roc_auc_score(y_val, preds)
-    prec, rec, f1, _ = precision_recall_fscore_support(y_val, preds>=0.5, average='binary')
-    brier = brier_score_loss(y_val, preds)
-    stats = dict(AUC=round(auc,3), F1=round(f1,3), Precision=round(prec,3),
-                 Recall=round(rec,3), Brier=round(brier,3))
-    print("Validation metrics:", stats)
-    skplt.metrics.plot_roc(y_val, preds.reshape(-1,1))
-    plt.title(f"ROC (AUC={auc:.2f})"); plt.savefig("roc_curve.png", dpi=120); plt.close()
-    skplt.metrics.plot_calibration_curve(y_val, [preds], ['GBM'])
-    plt.savefig("calibration.png", dpi=120); plt.close()
-    return clf, scaler, stats
 
+    clf = GradientBoostingClassifier(
+        n_estimators=N_EST,
+        max_depth=MAX_DEPTH,
+        learning_rate=0.05,
+        random_state=MODEL_SEED
+    )
+    clf.fit(X_train_s, y_train)
+
+    preds = clf.predict_proba(X_val_s)[:, 1]
+
+    # Metrics
+    auc   = roc_auc_score(y_val, preds)
+    prec, rec, f1, _ = precision_recall_fscore_support(
+        y_val, preds >= 0.5, average='binary'
+    )
+    brier = brier_score_loss(y_val, preds)
+
+    stats = dict(
+        AUC=round(auc,3), F1=round(f1,3),
+        Precision=round(prec,3), Recall=round(rec,3),
+        Brier=round(brier,3)
+    )
+    print("Validation metrics:", stats)
+
+    # --- ROC Curve ---
+    fpr, tpr, _ = roc_curve(y_val, preds)
+    plt.figure()
+    plt.plot(fpr, tpr, label=f"GBM (AUC={auc:.2f})")
+    plt.plot([0, 1], [0, 1], 'k--')
+    plt.xlabel("False Positive Rate")
+    plt.ylabel("True Positive Rate")
+    plt.title("ROC Curve")
+    plt.legend(loc="lower right")
+    plt.savefig("roc_curve.png", dpi=120)
+    plt.close()
+
+    # --- Calibration Curve ---
+    prob_true, prob_pred = calibration_curve(y_val, preds, n_bins=10)
+    plt.figure()
+    plt.plot(prob_pred, prob_true, marker='o', label="GBM")
+    plt.plot([0, 1], [0, 1], 'k--')
+    plt.xlabel("Mean Predicted Probability")
+    plt.ylabel("Fraction of Positives")
+    plt.title("Calibration Curve")
+    plt.legend(loc="best")
+    plt.savefig("calibration.png", dpi=120)
+    plt.close()
+
+    return clf, scaler, stats
 def predict_tile(clf, scaler, left, bottom, right, top, width, height):
     """Return 2-D prob array for bbox tile."""
     wx = get_noaa_grid((bottom+top)/2, (left+right)/2)
