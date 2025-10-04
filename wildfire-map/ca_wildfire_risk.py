@@ -45,8 +45,9 @@ MODEL_SEED   = 42
 CA_W, CA_S, CA_E, CA_N = -124.5, 32.25, -114.0, 42.0  # state bbox
 # ----------------------------- #
 
+
+
 def get_noaa_grid(lat, lon):
-    """Fetch 7-day weather aggregates (JSON API) and return xarray.Dataset-like object."""
     meta = requests.get(f"https://api.weather.gov/points/{lat},{lon}", timeout=30).json()
     wx_url = meta['properties']['forecastGridData']
     print("Fetching NOAA weather data …")
@@ -54,24 +55,18 @@ def get_noaa_grid(lat, lon):
     resp = requests.get(wx_url, headers={"User-Agent": "wildfire-risk-app"}, timeout=30)
     resp.raise_for_status()
     grid = resp.json()
+    print(grid["properties"]["windSpeed"])
+    times = [v["validTime"].split("/")[0] for v in grid["properties"]["temperature"]["values"]]
+    
+    df = pd.DataFrame({
+        "time": [v["validTime"].split("/")[0] for v in grid["properties"]["temperature"]["values"]],
+        "temperature": [v["value"] for v in grid["properties"]["temperature"]["values"]],
+        "wind": [v["value"] for v in grid["properties"]["windSpeed"]["values"]],
+        "humidity": [v["value"] for v in grid["properties"]["relativeHumidity"]["values"]],
+    }).dropna()
 
-    # Extract time-series (simplified: temperature, wind, humidity)
-    temp_vals = [v["value"] for v in grid["properties"]["temperature"]["values"] if v["value"] is not None]
-    wind_vals = [v["value"] for v in grid["properties"]["windSpeed"]["values"] if v["value"] is not None]
-    rh_vals   = [v["value"] for v in grid["properties"]["relativeHumidity"]["values"] if v["value"] is not None]
-
-    times = [v["validTime"].split("/")[0] for v in grid["properties"]["temperature"]["values"][:len(temp_vals)]]
-
-    # Construct xarray.Dataset manually
-    ds = xr.Dataset(
-        {
-            "temperature": ("time", temp_vals),
-            "maxWindSpeed": ("time", wind_vals),
-            "relativeHumidity": ("time", rh_vals),
-        },
-        coords={"time": np.array(times, dtype="datetime64")}
-    )
-    return ds
+    df["time"] = pd.to_datetime(df["time"])
+    return df
 
 
 def terrain_fuel_tile(left, bottom, right, top, width_px, height_px):
@@ -255,3 +250,4 @@ if __name__ == '__main__':
     clf, scaler, stats = train_model(37.0, -119.0)
     print("\nValidation summary:", stats)
     ca_risk_scan(clf, scaler, args.out)
+    
