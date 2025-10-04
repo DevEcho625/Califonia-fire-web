@@ -7,3 +7,17 @@ body {
   height: 90vh;
   width: 100vw;
 }
+
+/* ADD THIS CSS */
+#coordinate-display {
+  position: absolute;
+  top: 100px; /* Adjust based on your h2 height */
+  right: 10px;
+  z-index: 1000; /* Ensure it's above the map tiles */
+  background: white;
+  padding: 5px 10px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  font-size: 0.9em;
+}
+/* END OF ADDITION */

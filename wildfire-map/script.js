@@ -29,3 +29,13 @@ var riskPoints = [
 ];
 
 L.heatLayer(riskPoints, {radius: 25}).addTo(map);
+
+// --- 3. Add cursor coordinate display ---
+var coordDisplay = document.getElementById('coordinate-display');
+
+map.on('mousemove', function(e) {
+  var lat = e.latlng.lat.toFixed(4);
+  var lon = e.latlng.lng.toFixed(4);
+  coordDisplay.innerHTML = 'Lat: ' + lat + ', Lon: ' + lon;
+});
+// END OF ADDITION
