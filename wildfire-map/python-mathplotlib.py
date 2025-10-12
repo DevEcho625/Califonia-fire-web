@@ -288,6 +288,9 @@ wf_gdf = gpd.GeoDataFrame(
     geometry=[Point(xy) for xy in zip(wf_df[lon_col], wf_df[lat_col])],
     crs="EPSG:4326"
 )
+print("jello")
+print(wf_gdf.columns)
+
 
 
 # Remove invalid geometries
@@ -405,7 +408,7 @@ for geom in tqdm(grid_gdf.geometry, desc="labeling cells"):
     )
 grid_gdf["label_fire"] = np.array(labels, dtype=int)
 
-# --- 6. Model or heuristic scoring ---
+# --- 7. Model or heuristic scoring ---
 feature_cols = ["burned_area_km2", "burn_count", "dist_to_perimeter_m"]
 X = grid_gdf[feature_cols].fillna(0).values
 
@@ -440,34 +443,7 @@ else:
     print("Model ROC AUC:", auc)
     grid_gdf["fire_likelihood"] = proba
 """
-# --- 7. Output and visualize ---
-out_geojson = "grid_fire_likelihood.geojson"
-out_csv = "grid_fire_likelihood.csv"
-grid_gdf.to_file(out_geojson, driver="GeoJSON")
-
-grid_out = grid_gdf.copy()
-grid_out["centroid_x"] = [p.x for p in grid_out.centroid]
-grid_out["centroid_y"] = [p.y for p in grid_out.centroid]
-grid_out[["centroid_x", "centroid_y", "burned_area_km2", "burn_count", "dist_to_perimeter_m", "fire_likelihood"]].to_csv(out_csv, index=False)
-print("Saved:", out_csv, out_geojson)
-
-fig, ax = plt.subplots(figsize=(10,10))
-calfire_gdf.plot(ax=ax, linewidth=0.2, edgecolor="gray")
-grid_gdf.plot(column="fire_likelihood", ax=ax, alpha=0.8, legend=True)
-wf_gdf.plot(ax=ax, markersize=5, color="black")
-plt.title("Predicted Fire Likelihood (0–1)")
-plt.axis("off")
-plt.show()
-
-print("Risk stats: min {:.3f}, mean {:.3f}, max {:.3f}".format(
-    grid_gdf["fire_likelihood"].min(),
-    grid_gdf["fire_likelihood"].mean(),
-    grid_gdf["fire_likelihood"].max()
-))
-
-*/
-"""
-# --- 7. Output and visualize ---
+# --- 8. Output and visualize ---
 out_geojson = "grid_fire_likelihood.geojson"
 out_csv = "grid_fire_likelihood.csv"
 grid_gdf.to_file(out_geojson, driver="GeoJSON")
@@ -494,3 +470,86 @@ print("Risk stats: min {:.3f}, mean {:.3f}, max {:.3f}".format(
     grid_gdf["fire_likelihood"].mean(),
     grid_gdf["fire_likelihood"].max()
 ))
+"""
+"""
+# --- 7. Output and visualize ---
+out_geojson = "grid_fire_likelihood.geojson"
+out_csv = "grid_fire_likelihood.csv"
+grid_gdf.to_file(out_geojson, driver="GeoJSON")
+
+grid_out = grid_gdf.copy()
+grid_out["centroid_x"] = [p.x for p in grid_out.centroid]
+grid_out["centroid_y"] = [p.y for p in grid_out.centroid]
+grid_out[["centroid_x", "centroid_y", "burned_area_km2", "burn_count", 
+          "dist_to_perimeter_m", "fire_likelihood"]].to_csv(out_csv, index=False)
+print("Saved:", out_csv, out_geojson)
+
+# ✅ Ensure coordinate systems match
+wf_gdf = wf_gdf.to_crs(grid_gdf.crs)
+
+# --- 🔥 Visualization ---
+fig, ax = plt.subplots(figsize=(10,10))
+
+# Base layers
+calfire_gdf.plot(ax=ax, linewidth=0.2, edgecolor="gray")
+grid_gdf.plot(column="fire_likelihood", ax=ax, alpha=0.7, legend=True, cmap="YlOrRd")
+
+# Choose color column
+severity_col = "FinalAcres"
+
+# Handle missing or extreme values
+wf_gdf[severity_col] = wf_gdf[severity_col].fillna(0)
+wf_gdf[severity_col] = np.clip(wf_gdf[severity_col], 0, wf_gdf[severity_col].quantile(0.99))
+
+# Plot wildfires as colored points
+wf_gdf.plot(
+    ax=ax,
+    column=severity_col,
+    cmap="hot_r",        # 🔥 red/yellow palette
+    markersize=8 + 0.0005 * wf_gdf[severity_col],  # scale by size
+    alpha=0.8,
+    legend=True
+)
+
+plt.title("🔥 California Wildfires — Likelihood & Severity")
+plt.axis("off")
+plt.show()
+
+# --- Summary stats ---
+print("Risk stats: min {:.3f}, mean {:.3f}, max {:.3f}".format(
+    grid_gdf["fire_likelihood"].min(),
+    grid_gdf["fire_likelihood"].mean(),
+    grid_gdf["fire_likelihood"].max()
+))
+
+"""
+# --- 🔥 Visualization ---
+fig, ax = plt.subplots(figsize=(10,10))
+
+# Base map: CAL FIRE perimeters + model grid
+calfire_gdf.plot(ax=ax, linewidth=0.2, edgecolor="gray")
+grid_gdf.plot(column="fire_likelihood", ax=ax, alpha=0.7, legend=True, cmap="YlOrRd")
+
+# Choose color column
+severity_col = "FinalAcres"
+
+# Clean and convert data
+wf_gdf[severity_col] = pd.to_numeric(wf_gdf[severity_col], errors="coerce").fillna(0)
+wf_gdf[severity_col] = np.clip(wf_gdf[severity_col], 0, wf_gdf[severity_col].quantile(0.99))
+
+# Debug: print basic stats to confirm it’s numeric
+print("FinalAcres stats:", wf_gdf[severity_col].min(), wf_gdf[severity_col].mean(), wf_gdf[severity_col].max())
+
+# Plot fires as colored points
+wf_gdf.plot(
+    ax=ax,
+    column=severity_col,
+    cmap="hot_r",          # red/yellow color map
+    markersize=6 + 0.001 * wf_gdf[severity_col],  # scale by area
+    alpha=0.8,
+    legend=True
+)
+
+plt.title("🔥 California Wildfires — Likelihood & Severity (FinalAcres)")
+plt.axis("off")
+plt.show()
