@@ -21,7 +21,7 @@ class CurrentFireDataLoader:
         num_points_to_check = min(200, len(wfigs_df))
         print("Filtering out points that are not in California...")
         wfigs_df = wfigs_df[wfigs_df.apply(lambda row: CALI_DATA_LOADER.is_in_california(latitude=row['y'], longitude=row['x']), axis=1)]
-        wfigs_df = wfigs_df[["InitialLatitude", "InitialLongitude", "x", "y"]].dropna()
+        wfigs_df = wfigs_df[["InitialLatitude", "InitialLongitude", "x", "y", "FinalAcres"]]
         wfigs_df = gpd.GeoDataFrame(
             wfigs_df,
             geometry=[Point(xy) for xy in zip(wfigs_df["x"], wfigs_df["y"])],
