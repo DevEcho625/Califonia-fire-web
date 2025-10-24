@@ -41,86 +41,89 @@ def load_inputs():
 # --- 4. Generate grid for modeling ---
 # Approximate California bounds in EPSG:3310 (meters)
 def build_grid(wf_gdf, cell_size=1000, study_buffer=5000):
+    """
+    Clean GeoPandas-based grid generation - much faster and cleaner than the legacy approach.
+    """
+    # Clip to California bounds first
     ca_minx, ca_miny = -2500000, -2500000
     ca_maxx, ca_maxy = 1100000, 1300000
     wf_gdf = wf_gdf.cx[ca_minx:ca_maxx, ca_miny:ca_maxy]
     if wf_gdf.empty:
         raise RuntimeError("No WFIGS points within California bounds.")
 
-    minx, miny, maxx, maxy = wf_gdf.total_bounds
-    nx = int(np.ceil((maxx - minx) / cell_size))
-    ny = int(np.ceil((maxy - miny) / cell_size))
-    print(f"Grid size: {nx} × {ny}")
-
-    grid_polys, grid_centroids = [], []
-    for i in range(nx):
-        for j in range(ny):
-            x0, y0 = minx + i*cell_size, miny + j*cell_size
-            x1, y1 = x0 + cell_size, y0 + cell_size
-            grid_polys.append(box(x0, y0, x1, y1))
-            grid_centroids.append(((x0+x1)/2, (y0+y1)/2))
-
-    grid_gdf = gpd.GeoDataFrame(geometry=grid_polys, crs="EPSG:3310")
-    grid_gdf["centroid"] = [Point(c) for c in grid_centroids]
-
-    wf_bounds = wf_gdf.total_bounds
-    study_box = box(wf_bounds[0]-study_buffer, wf_bounds[1]-study_buffer,
-                    wf_bounds[2]+study_buffer, wf_bounds[3]+study_buffer)
-    grid_gdf = grid_gdf[grid_gdf.intersects(study_box)].reset_index(drop=True)
-    print("Grid cells after clipping:", len(grid_gdf))
+    # Get study area bounds and expand by buffer
+    bounds = wf_gdf.total_bounds  # [minx, miny, maxx, maxy]
+    minx, miny, maxx, maxy = bounds
+    minx -= study_buffer
+    miny -= study_buffer  
+    maxx += study_buffer
+    maxy += study_buffer
+    
+    # Create grid using numpy meshgrid (much faster than nested loops)
+    x_coords = np.arange(minx, maxx, cell_size)
+    y_coords = np.arange(miny, maxy, cell_size)
+    
+    # Generate all grid cells at once using list comprehension
+    grid_cells = [
+        box(x, y, x + cell_size, y + cell_size)
+        for x in x_coords
+        for y in y_coords
+    ]
+    
+    # Create GeoDataFrame
+    grid_gdf = gpd.GeoDataFrame(geometry=grid_cells, crs=wf_gdf.crs)
+    grid_gdf["centroid"] = grid_gdf.geometry.centroid
+    
+    print(f"Grid size: {len(x_coords)} × {len(y_coords)} = {len(grid_gdf)} cells")
     return grid_gdf
 
 # --- 5. Compute features ---
 def compute_features(grid_gdf, calfire_gdf):
+    """
+    More efficient feature computation using vectorized operations where possible.
+    """
     calfire_gdf = calfire_gdf.copy()
     calfire_gdf["perim_area"] = calfire_gdf.geometry.area
-    calfire_sindex = calfire_gdf.sindex
-
-    def compute_burned_area_for_cell(cell_geom):
-        possible_idx = list(calfire_sindex.intersection(cell_geom.bounds))
-        return sum(
-            calfire_gdf.geometry.iloc[i].intersection(cell_geom).area
-            for i in possible_idx
-            if calfire_gdf.geometry.iloc[i].intersects(cell_geom)
-        )
-
-    grid_gdf["burned_area_m2"] = [
-        compute_burned_area_for_cell(g) for g in tqdm(grid_gdf.geometry, desc="computing burned area")
-    ]
-    grid_gdf["burned_area_km2"] = grid_gdf["burned_area_m2"] / 1e6
-
-    def count_perimeters_in_cell(cell_geom):
-        possible_idx = list(calfire_sindex.intersection(cell_geom.bounds))
-        return sum(
-            calfire_gdf.geometry.iloc[i].intersects(cell_geom)
-            for i in possible_idx
-        )
-
-    grid_gdf["burn_count"] = [
-        count_perimeters_in_cell(g) for g in tqdm(grid_gdf.geometry, desc="counting perimeters")
-    ]
-
-    centroids = gpd.GeoSeries([p for p in grid_gdf.centroid], crs="EPSG:3310")
+    
+    # Use spatial join for burned area and count (much faster than loops)
+    print("Computing burned area and fire counts using spatial join...")
+    burned_join = gpd.sjoin(grid_gdf, calfire_gdf, how='left', predicate='intersects')
+    
+    # Group by grid cell and compute features
+    features = burned_join.groupby(burned_join.index).agg({
+        'geometry': 'first',  # Keep original grid geometry
+        'perim_area': ['sum', 'count']  # Sum burned area, count perimeters
+    }).reset_index()
+    
+    # Flatten column names
+    features.columns = ['grid_id', 'geometry', 'burned_area_m2', 'burn_count']
+    features['burned_area_km2'] = features['burned_area_m2'] / 1e6
+    
+    # Distance to nearest perimeter (still need to compute this)
+    print("Computing distances to nearest fire perimeters...")
+    grid_centroids = features.geometry.centroid
     nearest_distances = []
-    for c in tqdm(centroids, desc="computing distance"):
-        try:
-            possible_idx = list(calfire_sindex.nearest(c.bounds))
-        except TypeError:
-            possible_idx = list(calfire_sindex.intersection(c.bounds))
-        dmin = np.min([c.distance(calfire_gdf.geometry.iloc[i]) for i in possible_idx]) if possible_idx else np.inf
-        nearest_distances.append(dmin if np.isfinite(dmin) else 0)
-
-    grid_gdf["dist_to_perimeter_m"] = nearest_distances
-    return grid_gdf
+    
+    for centroid in tqdm(grid_centroids, desc="computing distance"):
+        distances = calfire_gdf.geometry.distance(centroid)
+        nearest_distances.append(distances.min())
+    
+    features['dist_to_perimeter_m'] = nearest_distances
+    
+    return features
 
 # --- 6. Label fire occurrence ---
 def label_cells(grid_gdf, wf_gdf):
-    wf_sindex = wf_gdf.sindex
-    labels = []
-    for geom in tqdm(grid_gdf.geometry, desc="labeling cells"):
-        possible = list(wf_sindex.intersection(geom.bounds))
-        labels.append(any(wf_gdf.geometry.iloc[i].within(geom) for i in possible))
-    grid_gdf["label_fire"] = np.array(labels, dtype=int)
+    """
+    More efficient cell labeling using spatial join.
+    """
+    print("Labeling cells with WFIGS fire points...")
+    # Use spatial join to find which grid cells contain WFIGS points
+    fire_join = gpd.sjoin(grid_gdf, wf_gdf, how='left', predicate='contains')
+    
+    # Create binary label: 1 if cell contains any fire, 0 otherwise
+    grid_gdf["label_fire"] = (grid_gdf.index.isin(fire_join.index)).astype(int)
+    
     return grid_gdf
 
 # --- 7. Model or heuristic scoring ---
@@ -173,10 +176,10 @@ def visualize(grid_gdf, calfire_gdf, wf_gdf):
 def main():
     wf_gdf, calfire_gdf = load_inputs()
     grid = build_grid(wf_gdf)
-    grid = compute_features(grid, calfire_gdf)
-    grid = label_cells(grid, wf_gdf)
-    grid = score(grid)
-    visualize(grid, calfire_gdf, wf_gdf)
+    features = compute_features(grid, calfire_gdf)
+    features = label_cells(features, wf_gdf)
+    features = score(features)
+    visualize(features, calfire_gdf, wf_gdf)
 
 
 if __name__ == "__main__":
